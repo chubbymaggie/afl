@@ -4,7 +4,7 @@
 
    Written and maintained by Michal Zalewski <lcamtuf@google.com>
 
-   Copyright 2015 Google Inc. All rights reserved.
+   Copyright 2015, 2016 Google Inc. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
    A simple test case minimizer that takes an input file and tries to remove
    as much data as possible while keeping the binary in a crashing state
    *or* producing consistent instrumentation output (the mode is auto-selected
-   based on initially observed behavior).
+   based on the initially observed behavior).
 
  */
 
@@ -46,7 +46,8 @@
 
 static s32 child_pid;                 /* PID of the tested program         */
 
-static u8* trace_bits;                /* SHM with instrumentation bitmap   */
+static u8 *trace_bits,                /* SHM with instrumentation bitmap   */
+          *mask_bitmap;               /* Mask for trace bits (-B)          */
 
 static u8 *in_file,                   /* Minimizer input test case         */
           *out_file,                  /* Minimizer output file             */
@@ -72,6 +73,7 @@ static s32 shm_id,                    /* ID of the SHM region              */
 static u8  crash_mode,                /* Crash-centric mode?               */
            exit_crash,                /* Treat non-zero exit as crash?     */
            edges_only,                /* Ignore hit counts?                */
+           exact_mode,                /* Require path match for crashes?   */
            use_stdin = 1;             /* Use stdin for program input?      */
 
 static volatile u8
@@ -81,21 +83,17 @@ static volatile u8
 
 /* Classify tuple counts. This is a slow & naive version, but good enough here. */
 
-#define AREP4(_sym)   (_sym), (_sym), (_sym), (_sym)
-#define AREP8(_sym)   AREP4(_sym),  AREP4(_sym)
-#define AREP16(_sym)  AREP8(_sym),  AREP8(_sym)
-#define AREP32(_sym)  AREP16(_sym), AREP16(_sym)
-#define AREP64(_sym)  AREP32(_sym), AREP32(_sym)
-#define AREP128(_sym) AREP64(_sym), AREP64(_sym)
+static const u8 count_class_lookup[256] = {
 
-static u8 count_class_lookup[256] = {
-
-  /* 0 - 3:       4 */ 0, 1, 2, 4,
-  /* 4 - 7:      +4 */ AREP4(8),
-  /* 8 - 15:     +8 */ AREP8(16),
-  /* 16 - 31:   +16 */ AREP16(32),
-  /* 32 - 127:  +96 */ AREP64(64), AREP32(64),
-  /* 128+:     +128 */ AREP128(128)
+  [0]           = 0,
+  [1]           = 1,
+  [2]           = 2,
+  [3]           = 4,
+  [4 ... 7]     = 8,
+  [8 ... 15]    = 16,
+  [16 ... 31]   = 32,
+  [32 ... 127]  = 64,
+  [128 ... 255] = 128
 
 };
 
@@ -122,6 +120,25 @@ static void classify_counts(u8* mem) {
 }
 
 
+/* Apply mask to classified bitmap (if set). */
+
+static void apply_mask(u32* mem, u32* mask) {
+
+  u32 i = (MAP_SIZE >> 2);
+
+  if (!mask) return;
+
+  while (i--) {
+
+    *mem &= ~*mask;
+    mem++;
+    mask++;
+
+  }
+
+}
+
+
 /* See if any bytes are set in the bitmap. */
 
 static inline u8 anything_set(void) {
@@ -141,7 +158,7 @@ static inline u8 anything_set(void) {
 
 static void remove_shm(void) {
 
-  unlink(prog_in); /* Ignore errors */
+  if (prog_in) unlink(prog_in); /* Ignore errors */
   shmctl(shm_id, IPC_RMID, NULL);
 
 }
@@ -266,6 +283,8 @@ static u8 run_target(char** argv, u8* mem, u32 len, u8 first_run) {
     close(dev_null_fd);
     close(prog_in_fd);
 
+    setsid();
+
     if (mem_limit) {
 
       r.rlim_max = r.rlim_cur = ((rlim_t)mem_limit) << 20;
@@ -318,10 +337,11 @@ static u8 run_target(char** argv, u8* mem, u32 len, u8 first_run) {
     FATAL("Unable to execute '%s'", argv[0]);
 
   classify_counts(trace_bits);
+  apply_mask((u32*)trace_bits, (u32*)mask_bitmap);
   total_execs++;
 
   if (stop_soon) {
-    SAYF(cLRD "\n+++ Minimization aborted by user +++\n" cRST);
+    SAYF(cRST cLRD "\n+++ Minimization aborted by user +++\n" cRST);
     exit(1);
   }
 
@@ -344,7 +364,7 @@ static u8 run_target(char** argv, u8* mem, u32 len, u8 first_run) {
 
     if (crash_mode) {
 
-      return 1;
+      if (!exact_mode) return 1;
 
     } else {
 
@@ -353,7 +373,7 @@ static u8 run_target(char** argv, u8* mem, u32 len, u8 first_run) {
 
     }
 
-  }
+  } else
 
   /* Handle non-crashing inputs appropriately. */
 
@@ -409,7 +429,7 @@ static void minimize(char** argv) {
 
   if (set_len < TMIN_SET_MIN_SIZE) set_len = TMIN_SET_MIN_SIZE;
 
-  ACTF(cBRI "Stage #0: " cNOR "One-time block normalization...");
+  ACTF(cBRI "Stage #0: " cRST "One-time block normalization...");
 
   while (set_pos < in_len) {
 
@@ -457,7 +477,7 @@ next_pass:
   del_len = next_p2(in_len / TRIM_START_STEPS);
   stage_o_len = in_len;
 
-  ACTF(cBRI "Stage #1: " cNOR "Removing blocks of data...");
+  ACTF(cBRI "Stage #1: " cRST "Removing blocks of data...");
 
 next_del_blksize:
 
@@ -465,7 +485,7 @@ next_del_blksize:
   del_pos  = 0;
   prev_del = 1;
 
-  SAYF(cGRA "    Block length = %u, remaining size = %u\n" cNOR,
+  SAYF(cGRA "    Block length = %u, remaining size = %u\n" cRST,
        del_len, in_len);
 
   while (del_pos < in_len) {
@@ -533,14 +553,14 @@ next_del_blksize:
   alpha_del1   = 0;
   syms_removed = 0;
 
-  memset(alpha_map, 0, 256);
+  memset(alpha_map, 0, 256 * sizeof(u32));
 
   for (i = 0; i < in_len; i++) {
     if (!alpha_map[in_data[i]]) alpha_size++;
     alpha_map[in_data[i]]++;
   }
 
-  ACTF(cBRI "Stage #2: " cNOR "Minimizing symbols (%u code point%s)...",
+  ACTF(cBRI "Stage #2: " cRST "Minimizing symbols (%u code point%s)...",
        alpha_size, alpha_size == 1 ? "" : "s");
 
   for (i = 0; i < 256; i++) {
@@ -580,7 +600,7 @@ next_del_blksize:
 
   alpha_del2 = 0;
 
-  ACTF(cBRI "Stage #3: " cNOR "Character minimization...");
+  ACTF(cBRI "Stage #3: " cRST "Character minimization...");
 
   memcpy(tmp_buf, in_data, in_len);
 
@@ -613,10 +633,10 @@ next_del_blksize:
 finalize_all:
 
   SAYF("\n"
-       cGRA "     File size reduced by : " cNOR "%0.02f%% (to %u byte%s)\n"
-       cGRA "    Characters simplified : " cNOR "%0.02f%%\n"
-       cGRA "     Number of execs done : " cNOR "%u\n"
-       cGRA "          Fruitless execs : " cNOR "path=%u crash=%u hang=%s%u\n\n",
+       cGRA "     File size reduced by : " cRST "%0.02f%% (to %u byte%s)\n"
+       cGRA "    Characters simplified : " cRST "%0.02f%%\n"
+       cGRA "     Number of execs done : " cRST "%u\n"
+       cGRA "          Fruitless execs : " cRST "path=%u crash=%u hang=%s%u\n\n",
        100 - ((double)in_len) * 100 / orig_len, in_len, in_len == 1 ? "" : "s",
        ((double)(alpha_d_total)) * 100 / (in_len ? in_len : 1),
        total_execs, missed_paths, missed_crashes, missed_hangs ? cLRD : "",
@@ -653,14 +673,14 @@ static void set_up_environment(void) {
 
     u8* use_dir = ".";
 
-    if (!access(use_dir, R_OK | W_OK | X_OK)) {
+    if (access(use_dir, R_OK | W_OK | X_OK)) {
 
       use_dir = getenv("TMPDIR");
       if (!use_dir) use_dir = "/tmp";
 
-      prog_in = alloc_printf("%s/.afl-tmin-temp-%u", use_dir, getpid());
-
     }
+
+    prog_in = alloc_printf("%s/.afl-tmin-temp-%u", use_dir, getpid());
 
   }
 
@@ -668,21 +688,44 @@ static void set_up_environment(void) {
 
   x = getenv("ASAN_OPTIONS");
 
-  if (x && !strstr(x, "abort_on_error=1"))
-    FATAL("Custom ASAN_OPTIONS set without abort_on_error=1 - please fix!");
+  if (x) {
+
+    if (!strstr(x, "abort_on_error=1"))
+      FATAL("Custom ASAN_OPTIONS set without abort_on_error=1 - please fix!");
+
+    if (!strstr(x, "symbolize=0"))
+      FATAL("Custom ASAN_OPTIONS set without symbolize=0 - please fix!");
+
+  }
 
   x = getenv("MSAN_OPTIONS");
 
-  if (x && !strstr(x, "exit_code=" STRINGIFY(MSAN_ERROR)))
-    FATAL("Custom MSAN_OPTIONS set without exit_code="
-          STRINGIFY(MSAN_ERROR) " - please fix!");
+  if (x) {
+
+    if (!strstr(x, "exit_code=" STRINGIFY(MSAN_ERROR)))
+      FATAL("Custom MSAN_OPTIONS set without exit_code="
+            STRINGIFY(MSAN_ERROR) " - please fix!");
+
+    if (!strstr(x, "symbolize=0"))
+      FATAL("Custom MSAN_OPTIONS set without symbolize=0 - please fix!");
+
+  }
 
   setenv("ASAN_OPTIONS", "abort_on_error=1:"
                          "detect_leaks=0:"
+                         "symbolize=0:"
                          "allocator_may_return_null=1", 0);
 
   setenv("MSAN_OPTIONS", "exit_code=" STRINGIFY(MSAN_ERROR) ":"
+                         "symbolize=0:"
+                         "abort_on_error=1:"
+                         "allocator_may_return_null=1:"
                          "msan_track_origins=0", 0);
+
+  if (getenv("AFL_PRELOAD")) {
+    setenv("LD_PRELOAD", getenv("AFL_PRELOAD"), 1);
+    setenv("DYLD_INSERT_LIBRARIES", getenv("AFL_PRELOAD"), 1);
+  }
 
 }
 
@@ -772,7 +815,9 @@ static void usage(u8* argv0) {
        "  -f file       - input file read by the tested program (stdin)\n"
        "  -t msec       - timeout for each run (%u ms)\n"
        "  -m megs       - memory limit for child process (%u MB)\n"
-       "  -Q            - use binary-only instrumentation (QEMU mode)\n\n"
+       "  -Q            - use binary-only instrumentation (QEMU mode)\n"
+       "  -U            - use Unicorn-based instrumentation (Unicorn mode)\n\n"
+       "                  (Not necessary, here for consistency with other afl-* tools)\n\n"
 
        "Minimization settings:\n\n"
 
@@ -899,20 +944,33 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
 }
 
+/* Read mask bitmap from file. This is for the -B option. */
+
+static void read_bitmap(u8* fname) {
+
+  s32 fd = open(fname, O_RDONLY);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_read(fd, mask_bitmap, MAP_SIZE, fname);
+
+  close(fd);
+
+}
 
 /* Main entry point */
 
 int main(int argc, char** argv) {
 
   s32 opt;
-  u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0;
+  u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0, unicorn_mode = 0;
   char** use_argv;
 
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
 
   SAYF(cCYA "afl-tmin " cBRI VERSION cRST " by <lcamtuf@google.com>\n");
 
-  while ((opt = getopt(argc,argv,"+i:o:f:m:t:xeQ")) > 0)
+  while ((opt = getopt(argc,argv,"+i:o:f:m:t:B:xeQU")) > 0)
 
     switch (opt) {
 
@@ -1004,6 +1062,34 @@ int main(int argc, char** argv) {
         qemu_mode = 1;
         break;
 
+      case 'U':
+
+        if (unicorn_mode) FATAL("Multiple -Q options not supported");
+        if (!mem_limit_given) mem_limit = MEM_LIMIT_UNICORN;
+
+        unicorn_mode = 1;
+        break;
+
+      case 'B': /* load bitmap */
+
+        /* This is a secret undocumented option! It is speculated to be useful
+           if you have a baseline "boring" input file and another "interesting"
+           file you want to minimize.
+
+           You can dump a binary bitmap for the boring file using
+           afl-showmap -b, and then load it into afl-tmin via -B. The minimizer
+           will then minimize to preserve only the edges that are unique to
+           the interesting input file, but ignoring everything from the
+           original map.
+
+           The option may be extended and made more official if it proves
+           to be useful. */
+
+        if (mask_bitmap) FATAL("Multiple -B options not supported");
+        mask_bitmap = ck_alloc(MAP_SIZE);
+        read_bitmap(optarg);
+        break;
+
       default:
 
         usage(argv[0]);
@@ -1025,6 +1111,8 @@ int main(int argc, char** argv) {
   else
     use_argv = argv + optind;
 
+  exact_mode = !!getenv("AFL_TMIN_EXACT");
+
   SAYF("\n");
 
   read_initial_file();
@@ -1039,18 +1127,24 @@ int main(int argc, char** argv) {
 
   if (!crash_mode) {
 
-     OKF("Program terminates normally, minimizing in " cCYA "instrumented" cNOR " mode.");
+     OKF("Program terminates normally, minimizing in " 
+         cCYA "instrumented" cRST " mode.");
+
      if (!anything_set()) FATAL("No instrumentation detected.");
 
   } else {
 
-     OKF("Program exits with a signal, minimizing in " cMGN "crash" cNOR " mode.");
+     OKF("Program exits with a signal, minimizing in " cMGN "%scrash" cRST
+         " mode.", exact_mode ? "EXACT " : "");
 
   }
 
   minimize(use_argv);
 
   ACTF("Writing output to '%s'...", out_file);
+
+  unlink(prog_in);
+  prog_in = NULL;
 
   close(write_to_file(out_file, in_data, in_len));
 

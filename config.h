@@ -4,7 +4,7 @@
 
    Written and maintained by Michal Zalewski <lcamtuf@google.com>
 
-   Copyright 2013, 2014, 2015 Google Inc. All rights reserved.
+   Copyright 2013, 2014, 2015, 2016 Google Inc. All rights reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -19,13 +19,18 @@
 
 #include "types.h"
 
+/* Version string: */
+
+#define VERSION             "2.51b"
+
 /******************************************************
  *                                                    *
  *  Settings that may be of interest to power users:  *
  *                                                    *
  ******************************************************/
 
-/* Comment out to disable terminal colors: */
+/* Comment out to disable terminal colors (note that this makes afl-analyze
+   a lot less nice): */
 
 #define USE_COLOR
 
@@ -33,7 +38,8 @@
 
 #define FANCY_BOXES
 
-/* Default timeout for fuzzed code (milliseconds): */
+/* Default timeout for fuzzed code (milliseconds). This is the upper bound,
+   also used for detecting hangs; the actual value is auto-scaled: */
 
 #define EXEC_TIMEOUT        1000
 
@@ -53,19 +59,19 @@
 
 #define MEM_LIMIT_QEMU      200
 
+/* Default memory limit when running in Unicorn mode (MB): */
+
+#define MEM_LIMIT_UNICORN   200
+
 /* Number of calibration cycles per every new test case (and for test
    cases that show variable behavior): */
 
-#define CAL_CYCLES          10
+#define CAL_CYCLES          8
 #define CAL_CYCLES_LONG     40
 
-/* The same, but when AFL_NO_VAR_CHECK is set in the environment: */
+/* Number of subsequent timeouts before abandoning an input file: */
 
-#define CAL_CYCLES_NO_VAR   4
-
-/* Number of subsequent hangs before abandoning an input file: */
-
-#define HANG_LIMIT          250
+#define TMOUT_LIMIT         250
 
 /* Maximum number of unique hangs or crashes to record: */
 
@@ -74,7 +80,8 @@
 
 /* Baseline number of random tweaks during a single 'havoc' stage: */
 
-#define HAVOC_CYCLES        5000
+#define HAVOC_CYCLES        256
+#define HAVOC_CYCLES_INIT   1024
 
 /* Maximum multiplier for the above (should be a power of two, beware
    of 32-bit int overflows): */
@@ -83,7 +90,7 @@
 
 /* Absolute minimum number of havoc cycles (after all adjustments): */
 
-#define HAVOC_MIN           10
+#define HAVOC_MIN           16
 
 /* Maximum stacking for havoc-stage tweaks. The actual value is calculated
    like this: 
@@ -104,6 +111,10 @@
 #define HAVOC_BLK_MEDIUM    128
 #define HAVOC_BLK_LARGE     1500
 
+/* Extra-large blocks, selected very rarely (<5% of the time): */
+
+#define HAVOC_BLK_XL        32768
+
 /* Probabilities of skipping non-favored entries in the queue, expressed as
    percentages: */
 
@@ -113,11 +124,11 @@
 
 /* Splicing cycle count: */
 
-#define SPLICE_CYCLES       20
+#define SPLICE_CYCLES       15
 
 /* Nominal per-splice havoc cycle length: */
 
-#define SPLICE_HAVOC        500
+#define SPLICE_HAVOC        32
 
 /* Maximum offset for integer addition / subtraction stages: */
 
@@ -320,6 +331,7 @@
 /* Constants for afl-gotcpu to control busy loop timing: */
 
 #define  CTEST_TARGET_MS    5000
+#define  CTEST_CORE_TRG_MS  1000
 #define  CTEST_BUSY_CYCLES  (10 * 1000 * 1000)
 
 /* Uncomment this to use inferior block-coverage-based instrumentation. Note
